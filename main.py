@@ -65,32 +65,32 @@ def get_value(item, *names, default=""):
 
 
 def response_items(data):
-    """TAGO JSON 응답에서 item 목록을 꺼낸다. 단일 항목/목록 응답을 모두 처리한다."""
+    """TAGO JSON 응답에서 item 목록을 꺼내고 API 오류를 구분한다."""
+    if not isinstance(data, dict):
+        raise RuntimeError("API 응답 형식이 예상과 달라요. 공공데이터포털의 응답 형식을 확인해 주세요.")
+
+    # 공공데이터포털 게이트웨이가 반환하는 인증/서비스 오류 형식
+    gateway_error = data.get("OpenAPI_ServiceResponse")
+    if gateway_error:
+        header = gateway_error.get("cmmMsgHeader", {}) if isinstance(gateway_error, dict) else {}
+        message = get_value(header, "errMsg", "returnAuthMsg", "returnReasonCode", default="API 게이트웨이 오류")
+        raise RuntimeError(f"공공데이터포털 API 오류: {message}. API 신청 상태와 인증키를 확인해 주세요.")
+
     root = data.get("response", data)
+    if not isinstance(root, dict):
+        raise RuntimeError("API 응답 형식이 올바르지 않아요.")
+
     header = root.get("header", {}) or {}
     code = str(header.get("resultCode", "00"))
     message = str(header.get("resultMsg", "정상 응답"))
 
-    if code not in ("00", "0", "NORMAL_CODE"):
-        raise ValueError(f"API 응답 오류({code}): {message}")
+    if code not in ("00", "0", "0000", "NORMAL_CODE"):
+        if code in ("20", "30") or "SERVICE_KEY" in message.upper() or "인증" in message:
+            raise RuntimeError("인증키 오류 또는 API 이용 권한 문제예요. 공공데이터포털에서 버스도착정보 API 활용신청과 인증키를 확인해 주세요.")
+        raise RuntimeError(f"API 응답 오류({code}): {message}")
 
     body = root.get("body", {}) or {}
+    if not isinstance(body, dict):
+        return []
     items = body.get("items", {})
     if items is None:
-        return []
-    if isinstance(items, dict):
-        found = items.get("item", [])
-    else:
-        found = items
-
-    if found is None or found == "":
-        return []
-    if isinstance(found, list):
-        return [row for row in found if isinstance(row, dict)]
-    if isinstance(found, dict):
-        return [found]
-    return []
-
-
-def call_tago_api(url, params, service_key):
-    """TAGO API를 호출하고 응답을 JSON으로 변환한다."""
