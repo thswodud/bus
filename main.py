@@ -1,4 +1,4 @@
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -12,6 +12,7 @@ st.set_page_config(
     page_title="몇 시에 나갈까?",
     page_icon="🚌",
     layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
 KST = ZoneInfo("Asia/Seoul")
@@ -22,14 +23,53 @@ KAKAO_TRANSIT_URL = "https://dapi.kakao.com/v2/routing/publictraffic"
 st.markdown(
     """
     <style>
-    .block-container {max-width: 850px; padding-top: 2rem; padding-bottom: 3rem;}
-    .hero {padding: 1.5rem; border-radius: 18px; background: linear-gradient(120deg,#153c59,#167c80); color: white; margin-bottom: 1.2rem;}
-    .hero h1 {color: white; margin: 0 0 .45rem 0; font-size: 2rem;}
-    .hero p {color: white; opacity: .92; margin: 0;}
-    .answer {padding: 1.3rem; border: 1px solid rgba(22,124,128,.35); border-radius: 16px; background: rgba(22,124,128,.07);}
-    .answer-label {font-size: .95rem; opacity: .8; margin-bottom: .4rem;}
-    .answer-time {font-size: 2.1rem; font-weight: 800; line-height: 1.25;}
-    .muted {font-size: .88rem; color: #687782;}
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    .block-container {
+        max-width: 850px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+    .hero {
+        padding: 1.5rem;
+        border-radius: 18px;
+        background: linear-gradient(120deg, #153c59, #167c80);
+        color: white;
+        margin-bottom: 1.2rem;
+    }
+    .hero h1 {
+        color: white;
+        margin: 0 0 .45rem 0;
+        font-size: 2rem;
+    }
+    .hero p {
+        color: white;
+        opacity: .92;
+        margin: 0;
+    }
+    .answer {
+        padding: 1.3rem;
+        border: 1px solid rgba(22,124,128,.35);
+        border-radius: 16px;
+        background: rgba(22,124,128,.07);
+    }
+    .answer-label {
+        font-size: .95rem;
+        opacity: .8;
+        margin-bottom: .4rem;
+    }
+    .answer-time {
+        font-size: 2.1rem;
+        font-weight: 800;
+        line-height: 1.25;
+    }
+    .muted {
+        font-size: .88rem;
+        color: #687782;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -59,7 +99,9 @@ def kakao_get(url, params, api_key):
     if response.status_code == 401:
         raise RuntimeError("카카오 REST API 키가 올바르지 않아요. 앱의 REST API 키인지 확인해 주세요.")
     if response.status_code == 403:
-        raise RuntimeError("카카오 API 권한이 없어요. 카카오 디벨로퍼스 앱 설정과 API 사용 권한을 확인해 주세요.")
+        raise RuntimeError(
+            "카카오 API 사용 권한이 없어요. 카카오 디벨로퍼스에서 앱과 카카오맵 API 활성화 상태를 확인해 주세요."
+        )
     if response.status_code == 429:
         raise RuntimeError("API 요청 한도를 초과했어요. 잠시 후 다시 시도해 주세요.")
     if not response.ok:
@@ -103,7 +145,7 @@ def search_place(query, api_key):
 
 
 def get_transit_routes(origin, destination, api_key):
-    """카카오 대중교통 경로 API에서 경로와 예상 소요시간을 가져온다."""
+    """카카오 대중교통 경로와 단계별 노선·정류장 정보를 가져온다."""
     data = kakao_get(
         KAKAO_TRANSIT_URL,
         {
@@ -131,8 +173,8 @@ def get_transit_routes(origin, destination, api_key):
         raise RuntimeError(messages.get(status, f"대중교통 경로 조회에 실패했어요. (상태: {status})"))
 
     routes = []
-    for raw in data.get("routes", []):
-        props = raw.get("properties", {}) or {}
+    for raw_route in data.get("routes", []):
+        props = raw_route.get("properties", {}) or {}
         try:
             total_seconds = int(props.get("totalTime", 0))
         except (TypeError, ValueError):
@@ -141,24 +183,60 @@ def get_transit_routes(origin, destination, api_key):
             continue
 
         steps = []
-        for step in raw.get("steps", []) or []:
-            step_props = step.get("properties", {}) or {}
-            guidance = step_props.get("guidance")
-            step_type = step_props.get("type", "")
-            if guidance:
-                steps.append({"type": step_type, "guidance": guidance})
+        for raw_step in raw_route.get("steps", []) or []:
+            step_props = raw_step.get("properties", {}) or {}
+
+            vehicles = []
+            for vehicle in step_props.get("vehicles", []) or []:
+                vehicles.append(
+                    {
+                        "name": str(vehicle.get("name", "")).strip(),
+                        "type": str(vehicle.get("type", "")).strip(),
+                    }
+                )
+
+            stops = [
+                str(stop.get("name", "")).strip()
+                for stop in (step_props.get("stops", []) or [])
+                if stop.get("name")
+            ]
+
+            try:
+                step_time = int(step_props.get("time", 0) or 0)
+            except (TypeError, ValueError):
+                step_time = 0
+            try:
+                step_distance = int(step_props.get("distance", 0) or 0)
+            except (TypeError, ValueError):
+                step_distance = 0
+
+            steps.append(
+                {
+                    "type": str(step_props.get("type", "")).upper(),
+                    "guidance": str(step_props.get("guidance", "")).strip(),
+                    "vehicles": vehicles,
+                    "stops": stops,
+                    "time": step_time,
+                    "distance": step_distance,
+                }
+            )
 
         fare_data = props.get("fare", {}) or {}
+        try:
+            transfers = int(props.get("transfers", 0) or 0)
+        except (TypeError, ValueError):
+            transfers = 0
+
         routes.append(
             {
                 "type": props.get("type", "대중교통"),
                 "seconds": total_seconds,
                 "minutes": max(1, round(total_seconds / 60)),
-                "transfers": int(props.get("transfers", 0) or 0),
+                "transfers": transfers,
                 "distance": int(props.get("totalDistance", 0) or 0),
                 "fare": fare_data.get("value"),
                 "steps": steps,
-                "landing_url": data.get("properties", {}).get("landingURL", ""),
+                "landing_url": (data.get("properties", {}) or {}).get("landingURL", ""),
             }
         )
 
@@ -183,6 +261,81 @@ def route_type_label(route_type):
     }.get(route_type, route_type or "대중교통")
 
 
+def vehicle_label(vehicle, step_type):
+    """API가 돌려준 차량 종류와 노선명을 보기 쉬운 형태로 바꾼다."""
+    name = vehicle.get("name", "").strip()
+    category = vehicle.get("type", "").strip()
+    if not name and not category:
+        return "노선 정보 없음"
+
+    if step_type == "BUS":
+        bus_kind = category if category else ""
+        if bus_kind and not bus_kind.endswith("버스"):
+            bus_kind += "버스"
+        number = name
+        if number and not number.endswith("번"):
+            number += "번"
+        return " ".join(part for part in [bus_kind, number] if part).strip() or "버스 노선"
+
+    return " ".join(part for part in [category, name] if part).strip() or "지하철 노선"
+
+
+def render_route_steps(route):
+    """걷기·버스·지하철을 순서대로 보여주고 각 노선의 승하차 정류장을 표시한다."""
+    if not route.get("steps"):
+        st.info("세부 이동 순서 정보가 제공되지 않았어요. 카카오맵에서 전체 경로를 확인해 주세요.")
+        return
+
+    bus_count = 0
+    transit_seen = False
+
+    for index, step in enumerate(route["steps"], start=1):
+        step_type = step.get("type", "")
+        if step_type == "BUS":
+            bus_count += 1
+            title_prefix = "첫 버스" if bus_count == 1 else f"환승 버스 {bus_count}번째"
+            title = title_prefix
+            transit_seen = True
+        elif step_type == "SUBWAY":
+            title = "지하철 이용" if not transit_seen else "환승 후 지하철 이용"
+            transit_seen = True
+        elif step_type == "WALKING":
+            title = "도보 이동"
+        else:
+            title = "이동 구간"
+
+        st.markdown(f"**{index}. {title}**")
+
+        vehicles = step.get("vehicles", [])
+        if vehicles:
+            labels = [vehicle_label(vehicle, step_type) for vehicle in vehicles]
+            st.write("이용 노선: " + " / ".join(labels))
+
+        stops = step.get("stops", [])
+        if stops and step_type in ("BUS", "SUBWAY"):
+            st.write(f"탑승: **{stops[0]}**  →  하차: **{stops[-1]}**")
+            if len(stops) > 2:
+                with st.expander(f"경유 정류장·역 {len(stops)}곳 확인"):
+                    st.write(" → ".join(stops))
+        elif stops:
+            st.write("경유 지점: " + " → ".join(stops))
+
+        guidance = step.get("guidance", "")
+        if guidance:
+            st.caption(guidance)
+
+        details = []
+        if step.get("time", 0) > 0:
+            details.append(f"약 {max(1, round(step['time'] / 60))}분")
+        if step.get("distance", 0) > 0:
+            details.append(f"약 {step['distance']:,}m")
+        if details:
+            st.caption(" · ".join(details))
+
+        if index < len(route["steps"]):
+            st.divider()
+
+
 # ------------------------------------------------------------
 # 화면
 # ------------------------------------------------------------
@@ -190,30 +343,18 @@ st.markdown(
     """
     <div class="hero">
       <h1>🚌 몇 시에 나갈까?</h1>
-      <p>출발지와 목적지, 도착해야 하는 시각을 입력하면 집에서 나갈 시간을 계산해 드려요.</p>
+      <p>출발지와 목적지, 도착해야 하는 시각을 입력하면 버스와 환승 경로 및 출발 시간을 알려드려요.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.subheader("API 설정")
-    api_key = get_api_key()
-    entered_key = st.text_input(
-        "카카오 REST API 키",
-        type="password",
-        placeholder="REST API 키 입력",
-        help="Streamlit Cloud에서는 Settings → Secrets에 KAKAO_REST_API_KEY로 저장하는 방법을 권장합니다.",
+api_key = get_api_key()
+if not api_key:
+    st.warning(
+        "카카오 API 키가 설정되지 않았어요. Streamlit Cloud의 Settings → Secrets에 "
+        '`KAKAO_REST_API_KEY = "발급받은_REST_API_키"` 형태로 등록해 주세요.'
     )
-    if entered_key.strip():
-        api_key = entered_key.strip()
-    if api_key:
-        st.success("API 키가 설정되어 있어요.")
-    else:
-        st.warning("장소 검색과 대중교통 길찾기를 사용하려면 API 키가 필요해요.")
-    st.markdown("[카카오 디벨로퍼스에서 앱 및 REST API 키 확인](https://developers.kakao.com/)")
-    st.divider()
-    st.caption("이 앱은 장소 검색과 대중교통 경로 조회에 카카오맵 API를 사용합니다.")
 
 now = datetime.now(KST)
 with st.form("trip_form"):
@@ -235,7 +376,9 @@ with st.form("trip_form"):
     with date_col:
         arrival_date = st.date_input("도착 날짜", value=now.date(), min_value=now.date())
     with time_col:
-        default_arrival_time = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0).time()
+        default_arrival_time = (now + timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
+        ).time()
         arrival_time = st.time_input("도착 희망 시각", value=default_arrival_time)
 
     buffer_minutes = st.slider(
@@ -244,14 +387,18 @@ with st.form("trip_form"):
         max_value=40,
         value=10,
         step=5,
-        help="경로 API 예상시간에 더해 둘 여유 시간입니다. 환승 대기나 혼잡 등을 고려해 설정하세요.",
+        help="예상 이동 시간에 더해 둘 여유 시간입니다. 환승 대기나 혼잡 등을 고려해 설정하세요.",
     )
 
-    submitted = st.form_submit_button("🚀 출발 시간 계산하기", type="primary", use_container_width=True)
+    submitted = st.form_submit_button(
+        "🚀 출발 시간과 대중교통 경로 확인하기",
+        type="primary",
+        use_container_width=True,
+    )
 
 if submitted:
     if not api_key:
-        st.error("카카오 REST API 키를 먼저 설정해 주세요. 왼쪽 사이드바에 입력하거나 Streamlit Cloud Secrets에 등록하면 됩니다.")
+        st.error("카카오 REST API 키를 Streamlit Cloud Secrets에 먼저 등록해 주세요.")
     elif not origin_text.strip() or not destination_text.strip():
         st.warning("출발지와 목적지를 모두 입력해 주세요.")
     else:
@@ -260,7 +407,7 @@ if submitted:
             st.error("도착 희망 시각은 현재 시각보다 뒤로 설정해 주세요.")
         else:
             try:
-                with st.spinner("출발지와 목적지를 찾고 대중교통 경로를 계산하고 있어요..."):
+                with st.spinner("출발지와 목적지를 찾고 버스·환승 경로를 계산하고 있어요..."):
                     origin = search_place(origin_text.strip(), api_key)
                     destination = search_place(destination_text.strip(), api_key)
                     routes = get_transit_routes(origin, destination, api_key)
@@ -292,7 +439,9 @@ if submitted:
                 metric3.metric("목표 도착", arrival_datetime.strftime("%H:%M"))
 
                 if departure <= current_time:
-                    st.warning("계산된 출발 시각이 이미 지났어요. 지금 바로 이동하더라도 목표 시각에 늦을 수 있으니 실제 운행 정보를 확인해 주세요.")
+                    st.warning(
+                        "계산된 출발 시각이 이미 지났어요. 지금 바로 이동하더라도 목표 시각에 늦을 수 있으니 실제 운행 정보를 확인해 주세요."
+                    )
                 else:
                     remaining = departure - current_time
                     remaining_minutes = max(0, int(remaining.total_seconds() // 60))
@@ -301,35 +450,69 @@ if submitted:
                 with st.expander("출발지·목적지 인식 결과"):
                     st.write(f"- 출발지: {origin['name']} — {origin['address']}")
                     st.write(f"- 목적지: {destination['name']} — {destination['address']}")
-                    st.caption("검색 결과가 의도한 장소와 다르면 역 이름, 지점명 또는 도로명 주소를 더 구체적으로 입력해 주세요.")
+                    st.caption(
+                        "검색 결과가 의도한 장소와 다르면 역 이름, 지점명 또는 도로명 주소를 더 구체적으로 입력해 주세요."
+                    )
+
+                st.markdown("### 추천 경로의 버스·환승 순서")
+                st.caption(
+                    f"{route_type_label(fastest['type'])} · 환승 {fastest['transfers']}회 · "
+                    f"총 이동 거리 {fastest['distance']:,}m"
+                    if fastest["distance"]
+                    else f"{route_type_label(fastest['type'])} · 환승 {fastest['transfers']}회"
+                )
+                render_route_steps(fastest)
+
+                if fastest.get("fare") is not None:
+                    st.write(f"예상 요금: 약 {int(fastest['fare']):,}원")
 
                 st.markdown("### 다른 이동 경로 비교")
-                for index, route in enumerate(routes[:5], start=1):
-                    route_departure = arrival_datetime - timedelta(minutes=route["minutes"] + buffer_minutes)
-                    title = f"경로 {index} · {route_type_label(route['type'])} · 약 {route['minutes']}분"
-                    with st.expander(title, expanded=(index == 1)):
-                        a, b, c = st.columns(3)
-                        a.metric("추천 출발", route_departure.strftime("%H:%M"))
-                        b.metric("환승", f"{route['transfers']}회")
-                        c.metric("총 이동 거리", f"{route['distance']:,}m" if route["distance"] else "정보 없음")
-                        if route["fare"] is not None:
-                            st.write(f"예상 요금: 약 {int(route['fare']):,}원")
-                        if route["steps"]:
-                            st.write("**이동 순서**")
-                            for step in route["steps"]:
-                                st.write(f"- {step['guidance']}")
+                if len(routes) > 1:
+                    for index, route in enumerate(routes[1:5], start=2):
+                        route_departure = arrival_datetime - timedelta(
+                            minutes=route["minutes"] + buffer_minutes
+                        )
+                        title = (
+                            f"경로 {index} · {route_type_label(route['type'])} · "
+                            f"약 {route['minutes']}분 · 환승 {route['transfers']}회"
+                        )
+                        with st.expander(title):
+                            a, b, c = st.columns(3)
+                            a.metric("추천 출발", route_departure.strftime("%H:%M"))
+                            b.metric("환승", f"{route['transfers']}회")
+                            c.metric(
+                                "총 이동 거리",
+                                f"{route['distance']:,}m" if route["distance"] else "정보 없음",
+                            )
+                            render_route_steps(route)
+                            if route.get("fare") is not None:
+                                st.write(f"예상 요금: 약 {int(route['fare']):,}원")
+                else:
+                    st.info("비교할 수 있는 추가 경로가 없어요.")
 
-                if fastest.get("landing_url"):
-                    st.link_button("카카오맵에서 경로 자세히 보기", fastest["landing_url"], use_container_width=True)
+                landing_url = fastest.get("landing_url")
+                if landing_url:
+                    st.link_button(
+                        "카카오맵에서 경로 자세히 보기",
+                        landing_url,
+                        use_container_width=True,
+                    )
 
                 st.caption(
-                    "계산 방식: 카카오 대중교통 경로의 예상 소요시간 + 사용자가 설정한 여유 시간을 도착 희망 시각에서 뺍니다. "
-                    "경로 시간은 실시간 교통 상황, 실제 출발 시각의 배차 간격, 환승 대기 등에 따라 달라질 수 있으므로 참고용으로 이용해 주세요."
+                    "계산 방식: 대중교통 경로의 예상 소요시간에 사용자가 설정한 여유 시간을 더한 뒤, "
+                    "도착 희망 시각에서 뺍니다. 버스 번호와 정류장 정보는 경로 API가 반환한 내용을 표시하며, "
+                    "실시간 도착 예정 시간이나 실제 배차를 보장하지는 않으므로 출발 전 운행 정보를 확인해 주세요."
                 )
             except RuntimeError as exc:
                 st.error(str(exc))
             except (KeyError, TypeError, ValueError) as exc:
-                st.error(f"응답 데이터 처리 중 문제가 발생했어요. 장소를 다시 입력하거나 잠시 후 시도해 주세요. ({exc})")
+                st.error(
+                    "응답 데이터 처리 중 문제가 발생했어요. 장소를 다시 입력하거나 잠시 후 시도해 주세요. "
+                    f"({exc})"
+                )
 
 st.divider()
-st.caption("본 프로그램은 대중교통 경로를 바탕으로 대략적인 출발 시각을 계산합니다. 실제 운행·배차 상황을 보장하지 않으므로 중요한 일정에는 여유 시간을 충분히 두세요.")
+st.caption(
+    "본 프로그램은 대중교통 경로를 바탕으로 대략적인 출발 시각을 계산합니다. "
+    "실제 운행·배차 상황을 보장하지 않으므로 중요한 일정에는 여유 시간을 충분히 두세요."
+)
