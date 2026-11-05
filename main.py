@@ -13,7 +13,7 @@ import streamlit.components.v1 as components
 st.set_page_config(
     page_title="몇 시에 나갈까?",
     page_icon="🚌",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -31,9 +31,49 @@ st.markdown(
         display: none !important;
     }
     .block-container {
-        max-width: 850px;
+        max-width: 900px;
         padding-top: 2rem;
         padding-bottom: 3rem;
+    }
+
+    /* 검색 결과가 있을 때 지도 패널을 화면 오른쪽에 고정한다. */
+    .block-container:has(.st-key-floating_route_map) {
+        max-width: 1500px !important;
+        padding-right: min(600px, 42vw) !important;
+    }
+    .st-key-floating_route_map {
+        position: fixed !important;
+        top: 5.25rem !important;
+        right: max(1rem, calc((100vw - 1500px) / 2)) !important;
+        width: min(38vw, 560px) !important;
+        z-index: 999 !important;
+        padding: .55rem !important;
+        border: 1px solid rgba(120, 130, 140, .25) !important;
+        border-radius: 16px !important;
+        background: var(--background-color, #fff) !important;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, .14) !important;
+    }
+    .st-key-floating_route_map iframe {
+        display: block !important;
+        width: 100% !important;
+        border-radius: 12px !important;
+    }
+    .st-key-floating_route_map [data-testid="stElementContainer"] {
+        width: 100% !important;
+    }
+
+    /* 좁은 화면에서는 지도 고정을 해제해 본문을 가리지 않게 한다. */
+    @media (max-width: 1100px) {
+        .block-container:has(.st-key-floating_route_map) {
+            max-width: 900px !important;
+            padding-right: 1rem !important;
+        }
+        .st-key-floating_route_map {
+            position: static !important;
+            width: 100% !important;
+            margin: 1rem 0 !important;
+            box-shadow: none !important;
+        }
     }
     .hero {
         padding: 1.5rem;
@@ -636,7 +676,10 @@ if submitted:
                     "추천 경로는 주황색 굵은 선, 대안 경로는 서로 다른 색의 선으로 표시했어요. "
                     "추천 경로 위의 번호 표시는 버스·지하철 탑승 순서이며, 선을 누르면 경로 정보를 볼 수 있어요."
                 )
-                render_route_comparison_map(origin, destination, routes)
+                with st.container(key="floating_route_map"):
+                    st.markdown("**추천 경로 지도**")
+                    st.caption("페이지를 아래로 스크롤해도 지도는 오른쪽에 고정되어 따라옵니다.")
+                    render_route_comparison_map(origin, destination, routes)
 
                 st.markdown("### 추천 경로의 버스·환승 순서")
                 st.caption(
