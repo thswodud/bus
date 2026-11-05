@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import json
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # ------------------------------------------------------------
@@ -201,6 +203,20 @@ def get_transit_routes(origin, destination, api_key):
                 if stop.get("name")
             ]
 
+            # API 좌표는 [경도, 위도]이므로 Leaflet용 [위도, 경도]로 바꾼다.
+            path_data = raw_step.get("path", {}) or {}
+            map_points = []
+            for coordinate in (path_data.get("points", []) or []):
+                if not isinstance(coordinate, (list, tuple)) or len(coordinate) < 2:
+                    continue
+                try:
+                    longitude = float(coordinate[0])
+                    latitude = float(coordinate[1])
+                except (TypeError, ValueError):
+                    continue
+                if -180 <= longitude <= 180 and -90 <= latitude <= 90:
+                    map_points.append([latitude, longitude])
+
             try:
                 step_time = int(step_props.get("time", 0) or 0)
             except (TypeError, ValueError):
@@ -218,6 +234,7 @@ def get_transit_routes(origin, destination, api_key):
                     "stops": stops,
                     "time": step_time,
                     "distance": step_distance,
+                    "map_points": map_points,
                 }
             )
 
@@ -334,6 +351,166 @@ def render_route_steps(route):
 
         if index < len(route["steps"]):
             st.divider()
+
+
+def render_route_comparison_map(origin, destination, routes):
+    """추천 경로와 대안 경로의 API 좌표를 한 지도에 표시한다."""
+    map_routes = []
+    for index, route in enumerate(routes[:5], start=1):
+        paths = []
+        segments = []
+        transit_order = 0
+        for step in route.get("steps", []):
+            points = step.get("map_points", [])
+            if len(points) < 2:
+                continue
+            paths.append(points)
+
+            step_type = step.get("type", "")
+            if step_type in ("BUS", "SUBWAY"):
+                transit_order += 1
+                vehicle_names = [
+                    vehicle_label(vehicle, step_type)
+                    for vehicle in step.get("vehicles", [])
+                ]
+                stops = step.get("stops", [])
+                mode_name = "버스" if step_type == "BUS" else "지하철"
+                segments.append(
+                    {
+                        "order": transit_order,
+                        "mode": mode_name,
+                        "vehicle": " / ".join(vehicle_names) if vehicle_names else f"{mode_name} 노선 정보 없음",
+                        "from_stop": stops[0] if stops else "승차 지점 정보 없음",
+                        "to_stop": stops[-1] if stops else "하차 지점 정보 없음",
+                        "start": points[0],
+                        "end": points[-1],
+                    }
+                )
+
+        if not paths:
+            continue
+        label = (
+            f"경로 {index} · {route_type_label(route['type'])} · "
+            f"약 {route['minutes']}분 · 환승 {route['transfers']}회"
+        )
+        map_routes.append(
+            {
+                "label": label,
+                "paths": paths,
+                "segments": segments,
+                "recommended": index == 1,
+            }
+        )
+
+    if not map_routes:
+        st.info(
+            "이 경로 응답에는 지도에 그릴 좌표가 포함되지 않았어요. "
+            "아래 카카오맵 길찾기 버튼에서 전체 경로를 확인해 주세요."
+        )
+        return
+
+    map_data = {
+        "origin": [origin["y"], origin["x"]],
+        "destination": [destination["y"], destination["x"]],
+        "origin_name": origin["name"],
+        "destination_name": destination["name"],
+        "routes": map_routes,
+    }
+    map_json = json.dumps(map_data, ensure_ascii=False).replace("</", "<\\/")
+
+    map_html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body {{ margin: 0; padding: 0; font-family: sans-serif; }}
+    #route-map {{ width: 100%; height: 510px; border-radius: 12px; }}
+    .map-legend {{ display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 10px 2px 0; font-size: 13px; }}
+    .legend-item {{ display: inline-flex; align-items: center; gap: 6px; }}
+    .legend-line {{ display: inline-block; width: 22px; height: 5px; border-radius: 4px; }}
+    .map-note {{ color: #687782; font-size: 12px; margin: 8px 2px 0; }}
+  </style>
+</head>
+<body>
+  <div id="route-map" role="img" aria-label="추천 대중교통 경로와 대안 경로 지도"></div>
+  <div id="route-legend" class="map-legend"></div>
+  <div class="map-note">지도 선은 경로 API가 반환한 좌표를 연결한 것이며, 실제 운행 상황과 차이가 있을 수 있습니다.</div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const data = {map_json};
+    const colors = ['#e4572e', '#2474d2', '#7b5ac7', '#26966f', '#bd4f91'];
+    const map = L.map('route-map', {{ scrollWheelZoom: false }});
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }}).addTo(map);
+
+    const allCoordinates = [];
+    data.routes.forEach((route, routeIndex) => {{
+      const color = colors[routeIndex % colors.length];
+      route.paths.forEach((path) => {{
+        if (path.length >= 2) {{
+          L.polyline(path, {{
+            color: color,
+            weight: route.recommended ? 7 : 5,
+            opacity: route.recommended ? 0.95 : 0.72,
+            lineCap: 'round',
+            lineJoin: 'round'
+          }}).addTo(map).bindPopup(route.label);
+          path.forEach(point => allCoordinates.push(point));
+        }}
+      }});
+
+      // 추천 경로의 버스·지하철 탑승 순서를 번호로 표시한다.
+      if (routeIndex === 0) {{
+        (route.segments || []).forEach((segment) => {{
+          const stepIcon = L.divIcon({{
+            className: '',
+            html: '<div style="width:28px;height:28px;line-height:28px;text-align:center;background:#fff;color:#172b4d;border:3px solid ' + color + ';border-radius:50%;font-weight:800;box-shadow:0 1px 5px #777">' + segment.order + '</div>',
+            iconSize: [34, 34],
+            iconAnchor: [17, 17]
+          }});
+          const popupText = segment.order + '번째 ' + segment.mode + ' 탑승<br>' +
+            segment.vehicle + '<br>탑승: ' + segment.from_stop + '<br>하차: ' + segment.to_stop;
+          L.marker(segment.start, {{ icon: stepIcon }}).addTo(map).bindPopup(popupText);
+          L.circleMarker(segment.end, {{ radius: 5, color: color, fillColor: '#fff', fillOpacity: 1, weight: 3 }})
+            .addTo(map).bindPopup(segment.order + '번째 구간 하차: ' + segment.to_stop);
+          allCoordinates.push(segment.start, segment.end);
+        }});
+      }}
+
+      const legend = document.createElement('div');
+      legend.className = 'legend-item';
+      const line = document.createElement('span');
+      line.className = 'legend-line';
+      line.style.backgroundColor = color;
+      const label = document.createElement('span');
+      label.textContent = route.label + (route.recommended ? ' (추천)' : '');
+      legend.appendChild(line);
+      legend.appendChild(label);
+      document.getElementById('route-legend').appendChild(legend);
+    }});
+
+    const startIcon = L.divIcon({{
+      className: '',
+      html: '<div style="background:#167c80;color:#fff;border:2px solid white;border-radius:18px;padding:5px 8px;font-weight:700;white-space:nowrap;box-shadow:0 1px 5px #777">출발</div>',
+      iconSize: [48, 28], iconAnchor: [24, 14]
+    }});
+    const endIcon = L.divIcon({{
+      className: '',
+      html: '<div style="background:#263b53;color:#fff;border:2px solid white;border-radius:18px;padding:5px 8px;font-weight:700;white-space:nowrap;box-shadow:0 1px 5px #777">도착</div>',
+      iconSize: [48, 28], iconAnchor: [24, 14]
+    }});
+    L.marker(data.origin, {{icon: startIcon}}).addTo(map).bindPopup('출발: ' + data.origin_name);
+    L.marker(data.destination, {{icon: endIcon}}).addTo(map).bindPopup('도착: ' + data.destination_name);
+    allCoordinates.push(data.origin, data.destination);
+    map.fitBounds(allCoordinates, {{ padding: [28, 28] }});
+  </script>
+</body>
+</html>"""
+    components.html(map_html, height=585, scrolling=False)
 
 
 # ------------------------------------------------------------
@@ -453,6 +630,13 @@ if submitted:
                     st.caption(
                         "검색 결과가 의도한 장소와 다르면 역 이름, 지점명 또는 도로명 주소를 더 구체적으로 입력해 주세요."
                     )
+
+                st.markdown("### 지도에서 추천 경로와 다른 경로 비교")
+                st.caption(
+                    "추천 경로는 주황색 굵은 선, 대안 경로는 서로 다른 색의 선으로 표시했어요. "
+                    "추천 경로 위의 번호 표시는 버스·지하철 탑승 순서이며, 선을 누르면 경로 정보를 볼 수 있어요."
+                )
+                render_route_comparison_map(origin, destination, routes)
 
                 st.markdown("### 추천 경로의 버스·환승 순서")
                 st.caption(
