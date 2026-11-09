@@ -607,6 +607,12 @@ with st.form("trip_form"):
         help="예상 이동 시간에 더해 둘 여유 시간입니다. 환승 대기나 혼잡 등을 고려해 설정하세요.",
     )
 
+    route_preference = st.selectbox(
+        "어떤 경로를 우선 추천할까요?",
+        options=["가장 빠른 경로", "환승이 적은 경로", "이동 거리가 짧은 경로"],
+        help="선택한 기준에 맞춰 추천 경로를 정하고, 나머지 경로도 지도와 목록에서 비교합니다.",
+    )
+
     submitted = st.form_submit_button(
         "🚀 출발 시간과 대중교통 경로 확인하기",
         type="primary",
@@ -629,10 +635,18 @@ if submitted:
                     destination = search_place(destination_text.strip(), api_key)
                     routes = get_transit_routes(origin, destination, api_key)
 
-                fastest = routes[0]
+                # 사용자가 고른 기준에 따라 추천 경로를 맨 앞으로 정렬한다.
+                if route_preference == "환승이 적은 경로":
+                    routes.sort(key=lambda route: (route["transfers"], route["seconds"]))
+                elif route_preference == "이동 거리가 짧은 경로":
+                    routes.sort(key=lambda route: (route["distance"] or 10**12, route["seconds"]))
+                else:
+                    routes.sort(key=lambda route: route["seconds"])
+
+                selected_route = routes[0]
                 departure, current_time = calculate_departure(
                     arrival_datetime,
-                    fastest["minutes"],
+                    selected_route["minutes"],
                     buffer_minutes,
                 )
 
@@ -651,8 +665,8 @@ if submitted:
                 )
 
                 metric1, metric2, metric3 = st.columns(3)
-                metric1.metric("예상 이동 시간", f"약 {fastest['minutes']}분")
-                metric2.metric("환승 횟수", f"{fastest['transfers']}회")
+                metric1.metric("예상 이동 시간", f"약 {selected_route['minutes']}분")
+                metric2.metric("환승 횟수", f"{selected_route['transfers']}회")
                 metric3.metric("목표 도착", arrival_datetime.strftime("%H:%M"))
 
                 if departure <= current_time:
@@ -668,13 +682,15 @@ if submitted:
                     st.write(f"- 출발지: {origin['name']} — {origin['address']}")
                     st.write(f"- 목적지: {destination['name']} — {destination['address']}")
                     st.caption(
-                        "검색 결과가 의도한 장소와 다르면 역 이름, 지점명 또는 도로명 주소를 더 구체적으로 입력해 주세요."
+                        "장소 검색은 입력어와 가장 가까운 결과를 우선 사용합니다. 다른 장소가 선택되면 역 이름, 지점명 또는 도로명 주소를 더 구체적으로 입력해 주세요."
                     )
+
+                st.info(f"추천 기준: **{route_preference}** · 선택한 경로를 기준으로 출발 시각을 계산했어요.")
 
                 st.markdown("### 지도에서 추천 경로와 다른 경로 비교")
                 st.caption(
-                    "추천 경로는 주황색 굵은 선, 대안 경로는 서로 다른 색의 선으로 표시했어요. "
-                    "추천 경로 위의 번호 표시는 버스·지하철 탑승 순서이며, 선을 누르면 경로 정보를 볼 수 있어요."
+                    "선택한 추천 경로는 주황색 굵은 선, 대안 경로는 서로 다른 색의 선으로 표시했어요. "
+                    "추천 경로 위의 번호 표시는 버스·지하철 탑승 순서이며, 선이나 번호를 누르면 경로 정보를 볼 수 있어요."
                 )
                 with st.container(key="floating_route_map"):
                     st.markdown("**추천 경로 지도**")
@@ -683,15 +699,15 @@ if submitted:
 
                 st.markdown("### 추천 경로의 버스·환승 순서")
                 st.caption(
-                    f"{route_type_label(fastest['type'])} · 환승 {fastest['transfers']}회 · "
-                    f"총 이동 거리 {fastest['distance']:,}m"
-                    if fastest["distance"]
-                    else f"{route_type_label(fastest['type'])} · 환승 {fastest['transfers']}회"
+                    f"{route_type_label(selected_route['type'])} · 환승 {selected_route['transfers']}회 · "
+                    f"총 이동 거리 {selected_route['distance']:,}m"
+                    if selected_route["distance"]
+                    else f"{route_type_label(selected_route['type'])} · 환승 {selected_route['transfers']}회"
                 )
-                render_route_steps(fastest)
+                render_route_steps(selected_route)
 
-                if fastest.get("fare") is not None:
-                    st.write(f"예상 요금: 약 {int(fastest['fare']):,}원")
+                if selected_route.get("fare") is not None:
+                    st.write(f"예상 요금: 약 {int(selected_route['fare']):,}원")
 
                 st.markdown("### 다른 이동 경로 비교")
                 if len(routes) > 1:
@@ -717,7 +733,7 @@ if submitted:
                 else:
                     st.info("비교할 수 있는 추가 경로가 없어요.")
 
-                landing_url = fastest.get("landing_url")
+                landing_url = selected_route.get("landing_url")
                 if landing_url:
                     st.link_button(
                         "카카오맵에서 경로 자세히 보기",
